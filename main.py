@@ -1,15 +1,10 @@
 from fastapi import FastAPI
-from pydantic import BaseModel # YENİ EKLENDİ: Kaan'dan gelen veriyi okumak için
-import pymysql
-
-app = FastAPI()
-
-from fastapi import FastAPI
 from pydantic import BaseModel
 import pymysql
-import os # YENİ: İşletim sistemi yollarını okumak için
-from dotenv import load_dotenv # YENİ: .env dosyasını yüklemek için
+import os
+from dotenv import load_dotenv
 
+# .env dosyasındaki gizli şifreleri sisteme yükle
 load_dotenv()
 
 app = FastAPI()
@@ -29,11 +24,23 @@ def get_db_connection():
         cursorclass=pymysql.cursors.DictCursor
     )
 
-
-# Kaan'ın bize göndereceği "Stok Güncelleme" paketinin formatını belirliyoruz
+# --- ŞABLONLAR (Kaan'dan Gelecek Veriler İçin) ---
 class StokGuncelleme(BaseModel):
     yeni_stok: int
 
+# YENİ: Kaan'ın formdan göndereceği yeni ürün paketinin şablonu
+class YeniUrun(BaseModel):
+    sku: str
+    name: str
+    category_id: int
+    supplier_id: int
+    unit_cost: float
+    unit_price: float
+    current_stock: int
+    reorder_point: int
+    abc_class: str
+
+# --- MEVCUT UÇ NOKTALAR (Okuma ve Güncelleme) ---
 @app.get("/")
 def ana_sayfa():
     return {"mesaj": "AWS Veritabanı ile İletişim Köprüsü Kuruldu!"}
@@ -43,10 +50,8 @@ def urunleri_getir():
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
-            sql = "SELECT * FROM products"
-            cursor.execute(sql)
-            urunler = cursor.fetchall()
-            return {"data": urunler}
+            cursor.execute("SELECT * FROM products")
+            return {"data": cursor.fetchall()}
     finally:
         connection.close()
 
@@ -55,13 +60,9 @@ def kritik_stok_getir():
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
-            sql = "SELECT * FROM products WHERE current_stock <= reorder_point"
-            cursor.execute(sql)
-            kritik_urunler = cursor.fetchall()
-            return {
-                "acil_durum_sayisi": len(kritik_urunler),
-                "data": kritik_urunler
-            }
+            cursor.execute("SELECT * FROM products WHERE current_stock <= reorder_point")
+            kritik = cursor.fetchall()
+            return {"acil_durum_sayisi": len(kritik), "data": kritik}
     finally:
         connection.close()
 
@@ -70,34 +71,50 @@ def tek_urun_getir(urun_id: int):
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
-            sql = "SELECT * FROM products WHERE product_id = %s"
-            cursor.execute(sql, (urun_id,))
+            cursor.execute("SELECT * FROM products WHERE product_id = %s", (urun_id,))
             urun = cursor.fetchone()
-            if urun:
-                return {"data": urun}
-            else:
-                return {"hata": "Böyle bir ürün bulunamadı!"}
+            return {"data": urun} if urun else {"hata": "Ürün bulunamadı!"}
     finally:
         connection.close()
 
-# --- 3. YENİ UÇ NOKTA: STOK GÜNCELLEME (YAZMA İŞLEMİ) ---
 @app.put("/urun/{urun_id}/stok")
 def stok_guncelle(urun_id: int, stok_bilgisi: StokGuncelleme):
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
-            # 1. Önce böyle bir ürün gerçekten var mı diye bakalım
             cursor.execute("SELECT * FROM products WHERE product_id = %s", (urun_id,))
             if not cursor.fetchone():
                 return {"hata": "Ürün bulunamadı!"}
-
-            # 2. Ürün varsa stoğunu AWS'de güncelle
-            sql = "UPDATE products SET current_stock = %s WHERE product_id = %s"
-            cursor.execute(sql, (stok_bilgisi.yeni_stok, urun_id))
             
-            # 3. ÇOK ÖNEMLİ: Değişikliği kalıcı olarak kaydet (Commit)
+            cursor.execute("UPDATE products SET current_stock = %s WHERE product_id = %s", (stok_bilgisi.yeni_stok, urun_id))
             connection.commit()
-            
             return {"mesaj": "Stok başarıyla güncellendi!", "yeni_stok": stok_bilgisi.yeni_stok}
+    finally:
+        connection.close()
+
+# --- YENİ UÇ NOKTA: SIFIRDAN ÜRÜN EKLE (POST) ---
+@app.post("/urun-ekle")
+def urun_ekle(urun: YeniUrun):
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            # SQL'in INSERT INTO komutu ile yepyeni bir satır oluşturuyoruz
+            sql = """
+            INSERT INTO products 
+            (sku, name, category_id, supplier_id, unit_cost, unit_price, current_stock, reorder_point, abc_class) 
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            
+            # Pydantic modelimizden (Kaan'dan) gelen verileri SQL'e sırasıyla yerleştiriyoruz
+            degerler = (urun.sku, urun.name, urun.category_id, urun.supplier_id, 
+                        urun.unit_cost, urun.unit_price, urun.current_stock, 
+                        urun.reorder_point, urun.abc_class)
+            
+            cursor.execute(sql, degerler)
+            connection.commit() # Değişikliği AWS'ye kalıcı olarak kaydet!
+            
+            return {"mesaj": "Harika! Yeni ürün veritabanına başarıyla eklendi.", "eklenen_urun": urun.name}
+    except Exception as e:
+        return {"hata": f"Ürün eklenirken bir sorun oluştu: {str(e)}"}
     finally:
         connection.close()
