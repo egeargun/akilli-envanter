@@ -155,3 +155,51 @@ def stok_hareketi_kaydet(hareket: StokHareketi):
         return {"hata": f"İşlem başarısız: {str(e)}"}
     finally:
         connection.close()
+
+        # --- 6. YENİ UÇ NOKTA: DASHBOARD / YÖNETİCİ ÖZETİ (GET) ---
+@app.get("/dashboard-ozet")
+def dashboard_ozet():
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            # 1. Genel Stok ve Finansal Durum (SQL'in Matematik Gücü)
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as toplam_urun_cesidi,
+                    SUM(current_stock) as depodaki_toplam_urun_sayisi,
+                    SUM(current_stock * unit_cost) as toplam_yatirim_maliyeti,
+                    SUM(current_stock * unit_price) as beklenen_satis_geliri
+                FROM products
+            """)
+            finans = cursor.fetchone()
+
+            # 2. Kritik Stok Uyarısı (Reorder Point altındakiler)
+            cursor.execute("SELECT COUNT(*) as acil_durum_sayisi FROM products WHERE current_stock <= reorder_point")
+            kritik = cursor.fetchone()
+
+            # 3. Son 5 Stok Hareketi (Kimin ne yaptığı - Tabloları Birleştiriyoruz)
+            cursor.execute("""
+                SELECT 
+                    t.transaction_id, 
+                    p.name as urun_adi, 
+                    t.quantity, 
+                    t.transaction_type, 
+                    t.notes
+                FROM inventory_transactions t
+                JOIN products p ON t.product_id = p.product_id
+                ORDER BY t.transaction_id DESC
+                LIMIT 5
+            """)
+            son_hareketler = cursor.fetchall()
+
+            # Bütün verileri tek bir paket yapıp Kaan'ın arayüzüne yolluyoruz
+            return {
+                "ozet_rapor": "Sistem Normal Çalışıyor",
+                "finansal_durum": finans,
+                "kritik_uyari_sayisi": kritik["acil_durum_sayisi"],
+                "son_islemler": son_hareketler
+            }
+    except Exception as e:
+        return {"hata": f"Dashboard verileri çekilemedi: {str(e)}"}
+    finally:
+        connection.close()
