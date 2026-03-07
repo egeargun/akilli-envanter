@@ -118,3 +118,40 @@ def urun_ekle(urun: YeniUrun):
         return {"hata": f"Ürün eklenirken bir sorun oluştu: {str(e)}"}
     finally:
         connection.close()
+
+        # --- ŞABLON: Stok Hareketi İçin ---
+class StokHareketi(BaseModel):
+    product_id: int
+    quantity: int
+    transaction_type: str # 'IN' (Giriş) veya 'OUT' (Çıkış)
+    notes: str = None
+
+# --- 5. YENİ UÇ NOKTA: STOK HAREKETİ KAYDET (POST) ---
+@app.post("/stok-hareketi")
+def stok_hareketi_kaydet(hareket: StokHareketi):
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            # 1. Hareketi 'inventory_transactions' tablosuna ekle
+            sql_log = """
+            INSERT INTO inventory_transactions 
+            (product_id, quantity, transaction_type, notes) 
+            VALUES (%s, %s, %s, %s)
+            """
+            cursor.execute(sql_log, (hareket.product_id, hareket.quantity, hareket.transaction_type, hareket.notes))
+            
+            # 2. Ürünün ana tablodaki (products) güncel stoğunu otomatik güncelle
+            # Eğer girişse (IN) topla, çıkışsa (OUT) çıkar
+            if hareket.transaction_type.upper() == "IN":
+                sql_update = "UPDATE products SET current_stock = current_stock + %s WHERE product_id = %s"
+            else:
+                sql_update = "UPDATE products SET current_stock = current_stock - %s WHERE product_id = %s"
+            
+            cursor.execute(sql_update, (hareket.quantity, hareket.product_id))
+            
+            connection.commit() # İki işlemi de birden onayla
+            return {"mesaj": "Stok hareketi işlendi ve ana stok güncellendi!"}
+    except Exception as e:
+        return {"hata": f"İşlem başarısız: {str(e)}"}
+    finally:
+        connection.close()
