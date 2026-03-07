@@ -4,11 +4,21 @@ import pymysql
 
 app = FastAPI()
 
-# --- VERİTABANI BAĞLANTI AYARLARI ---
-DB_HOST = "inventory-db.cj4socue4xip.eu-north-1.rds.amazonaws.com"
-DB_USER = "admin"
-DB_PASSWORD = "AWS_SIFREMIZI_GIRIN"  # Kendi şifrenle değiştirmeyi unutma!
-DB_NAME = "inventory_db"
+from fastapi import FastAPI
+from pydantic import BaseModel
+import pymysql
+import os # YENİ: İşletim sistemi yollarını okumak için
+from dotenv import load_dotenv # YENİ: .env dosyasını yüklemek için
+
+load_dotenv()
+
+app = FastAPI()
+
+# --- VERİTABANI BAĞLANTI AYARLARI (.env'den çekiliyor) ---
+DB_HOST = os.getenv("DB_HOST")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_NAME = os.getenv("DB_NAME")
 
 def get_db_connection():
     return pymysql.connect(
@@ -18,6 +28,7 @@ def get_db_connection():
         database=DB_NAME,
         cursorclass=pymysql.cursors.DictCursor
     )
+
 
 # Kaan'ın bize göndereceği "Stok Güncelleme" paketinin formatını belirliyoruz
 class StokGuncelleme(BaseModel):
