@@ -285,3 +285,44 @@ def abc_analizi():
         return {"hata": f"ABC Analizi yapılamadı: {str(e)}"}
     finally:
         connection.close()
+
+        # --- 8. YENİ UÇ NOKTA: KRİTİK STOK UYARISI (GET) ---
+@app.get("/kritik-stok")
+def kritik_stok_uyarisi():
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            # Mevcut stok, belirlenen alarm sınırının (reorder_point) altına düştüyse getir
+            # Ayrıca aciliyet sırasına göre diz (en çok eksiği olan en üstte çıksın)
+            cursor.execute("""
+                SELECT 
+                    product_id, 
+                    name, 
+                    current_stock, 
+                    reorder_point,
+                    (reorder_point - current_stock) as eksik_miktar,
+                    unit_cost,
+                    ((reorder_point - current_stock) * unit_cost) as tahmini_siparis_maliyeti
+                FROM products 
+                WHERE current_stock <= reorder_point
+                ORDER BY eksik_miktar DESC
+            """)
+            acil_urunler = cursor.fetchall()
+
+            # Eğer liste boşsa, her şey yolunda demektir
+            if not acil_urunler:
+                return {
+                    "durum": "Güvenli",
+                    "mesaj": "Harika! Depoda kritik seviyeye düşen hiçbir ürün yok."
+                }
+
+            # Verileri paketleyip gönderiyoruz
+            return {
+                "durum": "Kritik",
+                "toplam_acil_urun_sayisi": len(acil_urunler),
+                "acil_siparis_listesi": acil_urunler
+            }
+    except Exception as e:
+        return {"hata": f"Kritik stoklar çekilemedi: {str(e)}"}
+    finally:
+        connection.close()
