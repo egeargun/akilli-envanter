@@ -1,0 +1,6 @@
+dashboard => 127.0.0.1:8000/docs
+json => 127.0.0.1:8000
+
+terminalden başlatmak için
+uvicorn main:app --reload
+
