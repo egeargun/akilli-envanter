@@ -5,22 +5,23 @@ import pymysql
 import os
 from typing import Optional
 from dotenv import load_dotenv
+from datetime import date, timedelta
 
 # .env dosyasındaki gizli şifreleri sisteme yükle
 load_dotenv()
 
-app = FastAPI()
+app = FastAPI(title="Akıllı Kafe Envanter Sistemi API")
 
 # --- CORS AYARLARI (Kaan'ın Arayüzüne İzin Veriyoruz) ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Geliştirme aşamasında her yerden gelen isteği kabul et
+    allow_origins=["*"], 
     allow_credentials=True,
-    allow_methods=["*"], # GET, POST, PUT hepsine izin ver
+    allow_methods=["*"], 
     allow_headers=["*"],
 )
 
-# --- VERİTABANI BAĞLANTI AYARLARI (.env'den çekiliyor) ---
+# --- VERİTABANI BAĞLANTI AYARLARI ---
 DB_HOST = os.getenv("DB_HOST")
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
@@ -42,7 +43,6 @@ def get_db_connection():
 class StokGuncelleme(BaseModel):
     yeni_stok: int
 
-# Hoca İstekleriyle Güncellenmiş Ürün Ekleme Şablonu
 class ProductCreate(BaseModel):
     sku: str
     name: str
@@ -54,19 +54,16 @@ class ProductCreate(BaseModel):
     current_stock: int
     reorder_point: int
     abc_class: str
-    # --- YENİ EKLENENLER ---
-    expiration_date: Optional[str] = None # Örn: "2026-12-31" (SKT yoksa boş kalabilir)
-    warehouse_location: str = "Ana Depo"  # Belirtilmezse Ana Depo'ya gitsin
+    # SKT opsiyonel (Termos için boş, Süt için dolu gelecek)
+    expiration_date: Optional[str] = None 
+    warehouse_location: str = "Ana Depo"
 
-# Hoca İstekleriyle Güncellenmiş Stok Hareketi Şablonu
 class StockTransaction(BaseModel):
     product_id: int
     quantity: int
-    transaction_type: str # 'IN' (Giriş) veya 'OUT' (Çıkış)
+    transaction_type: str # 'IN', 'OUT' veya 'ADJUST'
     notes: Optional[str] = None
-    # --- YENİ EKLENEN ---
-    processed_by: str = "Admin" # İşlemi kim yaptı? (Örn: "Ege", "Kaan")
-
+    processed_by: str = "Admin" 
 
 # ==========================================
 # --- UÇ NOKTALAR (API ENDPOINTS) ---
@@ -74,48 +71,26 @@ class StockTransaction(BaseModel):
 
 @app.get("/")
 def ana_sayfa():
-    return {"mesaj": "AWS Veritabanı ile İletişim Köprüsü Kuruldu!"}
+    return {"mesaj": "Yeni Nesil Kafe Envanter Sistemi AWS'de Çalışıyor! ☕️"}
 
-# --- 1. TÜM ÜRÜNLERİ GETİR (GET) ---
+# --- 1. TÜM ÜRÜNLERİ GETİR ---
 @app.get("/urunler")
 def urunleri_getir():
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
-            cursor.execute("SELECT * FROM products")
+            # Kategorileri ve Tedarikçileri de ismen görebilmek için JOIN yapıyoruz
+            cursor.execute("""
+                SELECT p.*, c.name as category_name, s.name as supplier_name 
+                FROM products p
+                LEFT JOIN categories c ON p.category_id = c.category_id
+                LEFT JOIN suppliers s ON p.supplier_id = s.supplier_id
+            """)
             return {"data": cursor.fetchall()}
     finally:
         connection.close()
 
-# --- 2. TEK ÜRÜN GETİR (GET) ---
-@app.get("/urun/{urun_id}")
-def tek_urun_getir(urun_id: int):
-    connection = get_db_connection()
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT * FROM products WHERE product_id = %s", (urun_id,))
-            urun = cursor.fetchone()
-            return {"data": urun} if urun else {"hata": "Ürün bulunamadı!"}
-    finally:
-        connection.close()
-
-# --- 3. MANUEL STOK GÜNCELLE (PUT) ---
-@app.put("/urun/{urun_id}/stok")
-def stok_guncelle(urun_id: int, stok_bilgisi: StokGuncelleme):
-    connection = get_db_connection()
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT * FROM products WHERE product_id = %s", (urun_id,))
-            if not cursor.fetchone():
-                return {"hata": "Ürün bulunamadı!"}
-            
-            cursor.execute("UPDATE products SET current_stock = %s WHERE product_id = %s", (stok_bilgisi.yeni_stok, urun_id))
-            connection.commit()
-            return {"mesaj": "Stok başarıyla güncellendi!", "yeni_stok": stok_bilgisi.yeni_stok}
-    finally:
-        connection.close()
-
-# --- 4. SIFIRDAN ÜRÜN EKLE (POST) [GÜNCELLENDİ] ---
+# --- 2. YENİ ÜRÜN EKLE ---
 @app.post("/urun-ekle")
 def urun_ekle(urun: ProductCreate):
     connection = get_db_connection()
@@ -132,19 +107,18 @@ def urun_ekle(urun: ProductCreate):
             
             cursor.execute(sql, degerler)
             connection.commit()
-            return {"mesaj": "Harika! Yeni ürün SKT ve Lokasyon bilgisiyle veritabanına eklendi.", "eklenen_urun": urun.name}
+            return {"mesaj": f"{urun.name} başarıyla kafe envanterine eklendi!"}
     except Exception as e:
-        return {"hata": f"Ürün eklenirken bir sorun oluştu: {str(e)}"}
+        return {"hata": f"Ürün eklenirken hata: {str(e)}"}
     finally:
         connection.close()
 
-# --- 5. STOK HAREKETİ KAYDET (POST) [GÜNCELLENDİ] ---
+# --- 3. STOK HAREKETİ KAYDET (SATIŞ / GİRİŞ) ---
 @app.post("/stok-hareketi")
 def stok_hareketi_kaydet(hareket: StockTransaction):
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
-            # 1. Hareketi kimin yaptığıyla (processed_by) logla
             sql_log = """
             INSERT INTO inventory_transactions 
             (product_id, quantity, transaction_type, notes, processed_by) 
@@ -152,22 +126,20 @@ def stok_hareketi_kaydet(hareket: StockTransaction):
             """
             cursor.execute(sql_log, (hareket.product_id, hareket.quantity, hareket.transaction_type, hareket.notes, hareket.processed_by))
             
-            # 2. Ürünün ana tablodaki (products) güncel stoğunu otomatik güncelle
             if hareket.transaction_type.upper() == "IN":
                 sql_update = "UPDATE products SET current_stock = current_stock + %s WHERE product_id = %s"
-            else:
+            else: # OUT (Satış veya Fire)
                 sql_update = "UPDATE products SET current_stock = current_stock - %s WHERE product_id = %s"
             
             cursor.execute(sql_update, (hareket.quantity, hareket.product_id))
-            
             connection.commit() 
-            return {"mesaj": f"Stok hareketi {hareket.processed_by} tarafından işlendi ve ana stok güncellendi!"}
+            return {"mesaj": f"İşlem {hareket.processed_by} tarafından kaydedildi!"}
     except Exception as e:
         return {"hata": f"İşlem başarısız: {str(e)}"}
     finally:
         connection.close()
 
-# --- 6. DASHBOARD / YÖNETİCİ ÖZETİ (GET) ---
+# --- 4. DASHBOARD ÖZETİ ---
 @app.get("/dashboard-ozet")
 def dashboard_ozet():
     connection = get_db_connection()
@@ -176,9 +148,7 @@ def dashboard_ozet():
             cursor.execute("""
                 SELECT 
                     COUNT(*) as toplam_urun_cesidi,
-                    SUM(current_stock) as depodaki_toplam_urun_sayisi,
-                    SUM(current_stock * unit_cost) as toplam_yatirim_maliyeti,
-                    SUM(current_stock * unit_price) as beklenen_satis_geliri
+                    SUM(current_stock * unit_cost) as toplam_yatirim_maliyeti
                 FROM products
             """)
             finans = cursor.fetchone()
@@ -187,130 +157,58 @@ def dashboard_ozet():
             kritik = cursor.fetchone()
 
             cursor.execute("""
-                SELECT 
-                    t.transaction_id, 
-                    p.name as urun_adi, 
-                    t.quantity, 
-                    t.transaction_type, 
-                    t.notes,
-                    t.processed_by
+                SELECT t.transaction_id, p.name as urun_adi, t.quantity, t.transaction_type, t.processed_by, t.transaction_date
                 FROM inventory_transactions t
                 JOIN products p ON t.product_id = p.product_id
-                ORDER BY t.transaction_id DESC
-                LIMIT 5
+                ORDER BY t.transaction_id DESC LIMIT 5
             """)
             son_hareketler = cursor.fetchall()
 
             return {
-                "ozet_rapor": "Sistem Normal Çalışıyor",
                 "finansal_durum": finans,
-                "kritik_uyari_sayisi": kritik["acil_durum_sayisi"],
+                "kritik_stok_uyari_sayisi": kritik["acil_durum_sayisi"],
                 "son_islemler": son_hareketler
             }
-    except Exception as e:
-        return {"hata": f"Dashboard verileri çekilemedi: {str(e)}"}
     finally:
         connection.close()
 
-# --- 7. AKILLI ABC SINIFLANDIRMASI (GET) ---
-@app.get("/abc-analizi")
-def abc_analizi():
+# --- 5. HOCANIN İSTEDİĞİ: SKT UYARI SİSTEMİ (YENİ Zeka) ---
+@app.get("/skt-uyarisi")
+def skt_uyarisi():
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
+            # Sadece SKT'si olan (NULL olmayan) ve SKT'sine 30 günden az kalmış ürünleri getir
             cursor.execute("""
-                SELECT 
-                    product_id, 
-                    name, 
-                    current_stock, 
-                    unit_cost, 
-                    (current_stock * unit_cost) as toplam_deger 
-                FROM products 
-                WHERE current_stock > 0
-                ORDER BY toplam_deger DESC
+                SELECT product_id, name, expiration_date, current_stock, warehouse_location,
+                DATEDIFF(expiration_date, CURDATE()) as kalan_gun
+                FROM products
+                WHERE expiration_date IS NOT NULL AND DATEDIFF(expiration_date, CURDATE()) <= 30
+                ORDER BY kalan_gun ASC
             """)
-            urunler = cursor.fetchall()
+            bozulacak_urunler = cursor.fetchall()
 
-            if not urunler:
-                return {"mesaj": "Depoda analiz edilecek ürün yok."}
-
-            genel_toplam_deger = sum(urun["toplam_deger"] for urun in urunler)
-            kumulatif_deger = 0
-            a_sinifi, b_sinifi, c_sinifi = [], [], []
-
-            for urun in urunler:
-                kumulatif_deger += urun["toplam_deger"]
-                yuzde = (kumulatif_deger / genel_toplam_deger) * 100
-
-                urun_verisi = {
-                    "id": urun["product_id"],
-                    "isim": urun["name"],
-                    "stok": urun["current_stock"],
-                    "toplam_deger": float(urun["toplam_deger"]),
-                    "sinif": ""
-                }
-
-                if yuzde <= 80:
-                    urun_verisi["sinif"] = "A"
-                    a_sinifi.append(urun_verisi)
-                elif yuzde <= 95:
-                    urun_verisi["sinif"] = "B"
-                    b_sinifi.append(urun_verisi)
-                else:
-                    urun_verisi["sinif"] = "C"
-                    c_sinifi.append(urun_verisi)
+            if not bozulacak_urunler:
+                return {"durum": "Güvenli", "mesaj": "Yakın zamanda SKT'si dolacak ürün yok."}
 
             return {
-                "ozet": {
-                    "toplam_analiz_edilen_urun": len(urunler),
-                    "A_sinifi_urun_sayisi": len(a_sinifi),
-                    "B_sinifi_urun_sayisi": len(b_sinifi),
-                    "C_sinifi_urun_sayisi": len(c_sinifi)
-                },
-                "detaylar": {
-                    "A_Sinifi": a_sinifi,
-                    "B_Sinifi": b_sinifi,
-                    "C_Sinifi": c_sinifi
-                }
+                "durum": "Kritik",
+                "yaklasan_skt_sayisi": len(bozulacak_urunler),
+                "riskli_urunler": bozulacak_urunler
             }
-    except Exception as e:
-        return {"hata": f"ABC Analizi yapılamadı: {str(e)}"}
     finally:
         connection.close()
 
-# --- 8. KRİTİK STOK UYARISI (GET) ---
+# --- 6. KRİTİK STOK UYARISI ---
 @app.get("/kritik-stok")
 def kritik_stok_uyarisi():
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
             cursor.execute("""
-                SELECT 
-                    product_id, 
-                    name, 
-                    current_stock, 
-                    reorder_point,
-                    (reorder_point - current_stock) as eksik_miktar,
-                    unit_cost,
-                    ((reorder_point - current_stock) * unit_cost) as tahmini_siparis_maliyeti
-                FROM products 
-                WHERE current_stock <= reorder_point
-                ORDER BY eksik_miktar DESC
+                SELECT name, current_stock, reorder_point, warehouse_location
+                FROM products WHERE current_stock <= reorder_point
             """)
-            acil_urunler = cursor.fetchall()
-
-            if not acil_urunler:
-                return {
-                    "durum": "Güvenli",
-                    "mesaj": "Harika! Depoda kritik seviyeye düşen hiçbir ürün yok."
-                }
-
-            return {
-                "durum": "Kritik",
-                "toplam_acil_urun_sayisi": len(acil_urunler),
-                "acil_siparis_listesi": acil_urunler
-            }
-    except Exception as e:
-        return {"hata": f"Kritik stoklar çekilemedi: {str(e)}"}
+            return {"acil_siparis_listesi": cursor.fetchall()}
     finally:
         connection.close()
