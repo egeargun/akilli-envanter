@@ -7,6 +7,9 @@ from typing import Optional
 from dotenv import load_dotenv
 from datetime import date, timedelta
 from schemas import StokGuncelleme, ProductCreate, StockTransaction, TalepYaniti
+import csv
+import io
+from fastapi.responses import StreamingResponse
 
 # .env dosyasındaki gizli şifreleri sisteme yükle
 load_dotenv()
@@ -348,5 +351,56 @@ def talep_yanitla(islem_id: int, yanit: TalepYaniti):
             return {"mesaj": f"Talep başarıyla {yanit.yeni_durum} olarak güncellendi ve sistem işlendi."}
     except Exception as e:
         return {"hata": f"Talep yanıtlanırken hata oluştu: {str(e)}"}
+    finally:
+        connection.close()
+
+        # --- 11. HOCANIN İSTEDİĞİ: EXCEL (CSV) RAPOR ÇIKTISI ALMA (GET) ---
+@app.get("/export-envanter")
+def export_envanter():
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            # Depodaki tüm ürünlerin güncel durumunu çekiyoruz
+            cursor.execute("""
+                SELECT 
+                    sku as 'Ürün Kodu', 
+                    name as 'Ürün Adı', 
+                    current_stock as 'Güncel Stok', 
+                    reorder_point as 'Kritik Sınır', 
+                    unit_cost as 'Birim Maliyet (TL)', 
+                    (current_stock * unit_cost) as 'Toplam Değer (TL)',
+                    warehouse_location as 'Depo Konumu'
+                FROM products
+                ORDER BY current_stock DESC
+            """)
+            urunler = cursor.fetchall()
+
+            # Veri yoksa boş dönmesin
+            if not urunler:
+                return {"mesaj": "Depoda dışa aktarılacak ürün yok."}
+
+            # Hafızada sanal bir dosya oluşturuyoruz
+            stream = io.StringIO()
+            # Türkçe karakterlerin Excel'de bozulmaması için utf-8-sig formatını Kaan front-end'de halledebilir veya biz BOM ekleyebiliriz.
+            # CSV yazıcıyı ayarlıyoruz
+            writer = csv.DictWriter(stream, fieldnames=urunler[0].keys())
+            
+            # Başlıkları yaz (Ürün Kodu, Ürün Adı vb.)
+            writer.writeheader()
+            
+            # Bütün satırları yaz
+            for urun in urunler:
+                writer.writerow(urun)
+
+            # Dosyanın başına dön (okunabilmesi için)
+            stream.seek(0)
+
+            # Dosyayı "envanter_raporu.csv" adıyla indirmeye zorluyoruz
+            response = StreamingResponse(iter([stream.getvalue()]), media_type="text/csv")
+            response.headers["Content-Disposition"] = "attachment; filename=envanter_raporu.csv"
+            
+            return response
+    except Exception as e:
+        return {"hata": f"Rapor oluşturulurken hata: {str(e)}"}
     finally:
         connection.close()
