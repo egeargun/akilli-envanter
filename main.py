@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import pymysql
 import os
+from typing import Optional
 from dotenv import load_dotenv
 
 # .env dosyasındaki gizli şifreleri sisteme yükle
@@ -10,7 +11,7 @@ load_dotenv()
 
 app = FastAPI()
 
-# --- YENİ: CORS AYARLARI (Kaan'ın Arayüzüne İzin Veriyoruz) ---
+# --- CORS AYARLARI (Kaan'ın Arayüzüne İzin Veriyoruz) ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], # Geliştirme aşamasında her yerden gelen isteği kabul et
@@ -34,14 +35,18 @@ def get_db_connection():
         cursorclass=pymysql.cursors.DictCursor
     )
 
-# --- ŞABLONLAR (Kaan'dan Gelecek Veriler İçin) ---
+# ==========================================
+# --- ŞABLONLAR (PYDANTIC MODELLERİ) ---
+# ==========================================
+
 class StokGuncelleme(BaseModel):
     yeni_stok: int
 
-# YENİ: Kaan'ın formdan göndereceği yeni ürün paketinin şablonu
-class YeniUrun(BaseModel):
+# Hoca İstekleriyle Güncellenmiş Ürün Ekleme Şablonu
+class ProductCreate(BaseModel):
     sku: str
     name: str
+    description: Optional[str] = None
     category_id: int
     supplier_id: int
     unit_cost: float
@@ -49,12 +54,29 @@ class YeniUrun(BaseModel):
     current_stock: int
     reorder_point: int
     abc_class: str
+    # --- YENİ EKLENENLER ---
+    expiration_date: Optional[str] = None # Örn: "2026-12-31" (SKT yoksa boş kalabilir)
+    warehouse_location: str = "Ana Depo"  # Belirtilmezse Ana Depo'ya gitsin
 
-# --- MEVCUT UÇ NOKTALAR (Okuma ve Güncelleme) ---
+# Hoca İstekleriyle Güncellenmiş Stok Hareketi Şablonu
+class StockTransaction(BaseModel):
+    product_id: int
+    quantity: int
+    transaction_type: str # 'IN' (Giriş) veya 'OUT' (Çıkış)
+    notes: Optional[str] = None
+    # --- YENİ EKLENEN ---
+    processed_by: str = "Admin" # İşlemi kim yaptı? (Örn: "Ege", "Kaan")
+
+
+# ==========================================
+# --- UÇ NOKTALAR (API ENDPOINTS) ---
+# ==========================================
+
 @app.get("/")
 def ana_sayfa():
     return {"mesaj": "AWS Veritabanı ile İletişim Köprüsü Kuruldu!"}
 
+# --- 1. TÜM ÜRÜNLERİ GETİR (GET) ---
 @app.get("/urunler")
 def urunleri_getir():
     connection = get_db_connection()
@@ -65,17 +87,7 @@ def urunleri_getir():
     finally:
         connection.close()
 
-@app.get("/kritik-stok")
-def kritik_stok_getir():
-    connection = get_db_connection()
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT * FROM products WHERE current_stock <= reorder_point")
-            kritik = cursor.fetchall()
-            return {"acil_durum_sayisi": len(kritik), "data": kritik}
-    finally:
-        connection.close()
-
+# --- 2. TEK ÜRÜN GETİR (GET) ---
 @app.get("/urun/{urun_id}")
 def tek_urun_getir(urun_id: int):
     connection = get_db_connection()
@@ -87,6 +99,7 @@ def tek_urun_getir(urun_id: int):
     finally:
         connection.close()
 
+# --- 3. MANUEL STOK GÜNCELLE (PUT) ---
 @app.put("/urun/{urun_id}/stok")
 def stok_guncelle(urun_id: int, stok_bilgisi: StokGuncelleme):
     connection = get_db_connection()
@@ -102,56 +115,44 @@ def stok_guncelle(urun_id: int, stok_bilgisi: StokGuncelleme):
     finally:
         connection.close()
 
-# --- YENİ UÇ NOKTA: SIFIRDAN ÜRÜN EKLE (POST) ---
+# --- 4. SIFIRDAN ÜRÜN EKLE (POST) [GÜNCELLENDİ] ---
 @app.post("/urun-ekle")
-def urun_ekle(urun: YeniUrun):
+def urun_ekle(urun: ProductCreate):
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
-            # SQL'in INSERT INTO komutu ile yepyeni bir satır oluşturuyoruz
             sql = """
             INSERT INTO products 
-            (sku, name, category_id, supplier_id, unit_cost, unit_price, current_stock, reorder_point, abc_class) 
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (sku, name, description, category_id, supplier_id, unit_cost, unit_price, current_stock, reorder_point, abc_class, expiration_date, warehouse_location) 
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
-            
-            # Pydantic modelimizden (Kaan'dan) gelen verileri SQL'e sırasıyla yerleştiriyoruz
-            degerler = (urun.sku, urun.name, urun.category_id, urun.supplier_id, 
-                        urun.unit_cost, urun.unit_price, urun.current_stock, 
-                        urun.reorder_point, urun.abc_class)
+            degerler = (urun.sku, urun.name, urun.description, urun.category_id, urun.supplier_id, 
+                        urun.unit_cost, urun.unit_price, urun.current_stock, urun.reorder_point, 
+                        urun.abc_class, urun.expiration_date, urun.warehouse_location)
             
             cursor.execute(sql, degerler)
-            connection.commit() # Değişikliği AWS'ye kalıcı olarak kaydet!
-            
-            return {"mesaj": "Harika! Yeni ürün veritabanına başarıyla eklendi.", "eklenen_urun": urun.name}
+            connection.commit()
+            return {"mesaj": "Harika! Yeni ürün SKT ve Lokasyon bilgisiyle veritabanına eklendi.", "eklenen_urun": urun.name}
     except Exception as e:
         return {"hata": f"Ürün eklenirken bir sorun oluştu: {str(e)}"}
     finally:
         connection.close()
 
-        # --- ŞABLON: Stok Hareketi İçin ---
-class StokHareketi(BaseModel):
-    product_id: int
-    quantity: int
-    transaction_type: str # 'IN' (Giriş) veya 'OUT' (Çıkış)
-    notes: str = None
-
-# --- 5. YENİ UÇ NOKTA: STOK HAREKETİ KAYDET (POST) ---
+# --- 5. STOK HAREKETİ KAYDET (POST) [GÜNCELLENDİ] ---
 @app.post("/stok-hareketi")
-def stok_hareketi_kaydet(hareket: StokHareketi):
+def stok_hareketi_kaydet(hareket: StockTransaction):
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
-            # 1. Hareketi 'inventory_transactions' tablosuna ekle
+            # 1. Hareketi kimin yaptığıyla (processed_by) logla
             sql_log = """
             INSERT INTO inventory_transactions 
-            (product_id, quantity, transaction_type, notes) 
-            VALUES (%s, %s, %s, %s)
+            (product_id, quantity, transaction_type, notes, processed_by) 
+            VALUES (%s, %s, %s, %s, %s)
             """
-            cursor.execute(sql_log, (hareket.product_id, hareket.quantity, hareket.transaction_type, hareket.notes))
+            cursor.execute(sql_log, (hareket.product_id, hareket.quantity, hareket.transaction_type, hareket.notes, hareket.processed_by))
             
             # 2. Ürünün ana tablodaki (products) güncel stoğunu otomatik güncelle
-            # Eğer girişse (IN) topla, çıkışsa (OUT) çıkar
             if hareket.transaction_type.upper() == "IN":
                 sql_update = "UPDATE products SET current_stock = current_stock + %s WHERE product_id = %s"
             else:
@@ -159,20 +160,19 @@ def stok_hareketi_kaydet(hareket: StokHareketi):
             
             cursor.execute(sql_update, (hareket.quantity, hareket.product_id))
             
-            connection.commit() # İki işlemi de birden onayla
-            return {"mesaj": "Stok hareketi işlendi ve ana stok güncellendi!"}
+            connection.commit() 
+            return {"mesaj": f"Stok hareketi {hareket.processed_by} tarafından işlendi ve ana stok güncellendi!"}
     except Exception as e:
         return {"hata": f"İşlem başarısız: {str(e)}"}
     finally:
         connection.close()
 
-        # --- 6. YENİ UÇ NOKTA: DASHBOARD / YÖNETİCİ ÖZETİ (GET) ---
+# --- 6. DASHBOARD / YÖNETİCİ ÖZETİ (GET) ---
 @app.get("/dashboard-ozet")
 def dashboard_ozet():
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
-            # 1. Genel Stok ve Finansal Durum (SQL'in Matematik Gücü)
             cursor.execute("""
                 SELECT 
                     COUNT(*) as toplam_urun_cesidi,
@@ -183,18 +183,17 @@ def dashboard_ozet():
             """)
             finans = cursor.fetchone()
 
-            # 2. Kritik Stok Uyarısı (Reorder Point altındakiler)
             cursor.execute("SELECT COUNT(*) as acil_durum_sayisi FROM products WHERE current_stock <= reorder_point")
             kritik = cursor.fetchone()
 
-            # 3. Son 5 Stok Hareketi (Kimin ne yaptığı - Tabloları Birleştiriyoruz)
             cursor.execute("""
                 SELECT 
                     t.transaction_id, 
                     p.name as urun_adi, 
                     t.quantity, 
                     t.transaction_type, 
-                    t.notes
+                    t.notes,
+                    t.processed_by
                 FROM inventory_transactions t
                 JOIN products p ON t.product_id = p.product_id
                 ORDER BY t.transaction_id DESC
@@ -202,7 +201,6 @@ def dashboard_ozet():
             """)
             son_hareketler = cursor.fetchall()
 
-            # Bütün verileri tek bir paket yapıp Kaan'ın arayüzüne yolluyoruz
             return {
                 "ozet_rapor": "Sistem Normal Çalışıyor",
                 "finansal_durum": finans,
@@ -214,13 +212,12 @@ def dashboard_ozet():
     finally:
         connection.close()
 
-        # --- 7. YENİ UÇ NOKTA: AKILLI ABC SINIFLANDIRMASI (GET) ---
+# --- 7. AKILLI ABC SINIFLANDIRMASI (GET) ---
 @app.get("/abc-analizi")
 def abc_analizi():
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
-            # 1. Bütün ürünleri toplam değerlerine göre büyükten küçüğe sıralayarak çek
             cursor.execute("""
                 SELECT 
                     product_id, 
@@ -237,10 +234,7 @@ def abc_analizi():
             if not urunler:
                 return {"mesaj": "Depoda analiz edilecek ürün yok."}
 
-            # 2. Deponun genel toplam değerini hesapla (Yüzde bulmak için)
             genel_toplam_deger = sum(urun["toplam_deger"] for urun in urunler)
-
-            # 3. ABC Sınıflandırması Algoritması
             kumulatif_deger = 0
             a_sinifi, b_sinifi, c_sinifi = [], [], []
 
@@ -256,7 +250,6 @@ def abc_analizi():
                     "sinif": ""
                 }
 
-                # Pareto Kuralı: %80 (A), %15 (B), %5 (C)
                 if yuzde <= 80:
                     urun_verisi["sinif"] = "A"
                     a_sinifi.append(urun_verisi)
@@ -267,7 +260,6 @@ def abc_analizi():
                     urun_verisi["sinif"] = "C"
                     c_sinifi.append(urun_verisi)
 
-            # JSON Olarak Kaan'a Fırlat
             return {
                 "ozet": {
                     "toplam_analiz_edilen_urun": len(urunler),
@@ -286,14 +278,12 @@ def abc_analizi():
     finally:
         connection.close()
 
-        # --- 8. YENİ UÇ NOKTA: KRİTİK STOK UYARISI (GET) ---
+# --- 8. KRİTİK STOK UYARISI (GET) ---
 @app.get("/kritik-stok")
 def kritik_stok_uyarisi():
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
-            # Mevcut stok, belirlenen alarm sınırının (reorder_point) altına düştüyse getir
-            # Ayrıca aciliyet sırasına göre diz (en çok eksiği olan en üstte çıksın)
             cursor.execute("""
                 SELECT 
                     product_id, 
@@ -309,14 +299,12 @@ def kritik_stok_uyarisi():
             """)
             acil_urunler = cursor.fetchall()
 
-            # Eğer liste boşsa, her şey yolunda demektir
             if not acil_urunler:
                 return {
                     "durum": "Güvenli",
                     "mesaj": "Harika! Depoda kritik seviyeye düşen hiçbir ürün yok."
                 }
 
-            # Verileri paketleyip gönderiyoruz
             return {
                 "durum": "Kritik",
                 "toplam_acil_urun_sayisi": len(acil_urunler),
